@@ -1,0 +1,113 @@
+<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no"><title>Navegación Astronómica · VR V07</title><style>
+body{margin:0;overflow:hidden;background:#020b17;color:#e8ddc5;font:14px system-ui}#info{position:fixed;top:12px;left:12px;background:#071525bb;padding:10px;border-radius:8px;z-index:2;pointer-events:none}#info small{display:block;color:#b4c9d9}#err{color:#ffb3a0}button{font:inherit}#audioButton{position:fixed;bottom:18px;left:18px;z-index:5;padding:10px 14px;background:#102d47;color:#fff;border:1px solid #7a9fbb;border-radius:8px;display:none}
+</style><script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.160.1/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.160.1/examples/jsm/"}}</script></head><body><div id="info">⚓ Navegación Astronómica · V08 VR<small>Quest 3: entrar en VR · joystick izquierdo caminar · derecho girar</small><small>Gatillo derecho: tomar/soltar timón al acercarse · joystick derecho: gobernar</small><small id="status">Cargando barco...</small><small id="err"></small></div><button id="audioButton" type="button">🔊 Activar sonido del mar</button><script type="module">
+import * as THREE from 'three';import {FBXLoader} from 'three/addons/loaders/FBXLoader.js';import {VRButton} from 'three/addons/webxr/VRButton.js';
+const scene=new THREE.Scene();scene.background=new THREE.Color(0x020b19);scene.fog=new THREE.FogExp2(0x020b19,.0007);
+const renderer=new THREE.WebGLRenderer({antialias:true,powerPreference:'high-performance'});renderer.setPixelRatio(Math.min(devicePixelRatio,1.5));renderer.setSize(innerWidth,innerHeight);renderer.xr.enabled=true;renderer.outputColorSpace=THREE.SRGBColorSpace;document.body.appendChild(renderer.domElement);document.body.appendChild(VRButton.createButton(renderer));
+// Audio del océano: el archivo ya está en GitHub, en la carpeta audio/.
+const oceanAudio = new Audio('./audio/Oceano_Mar_Abierto_Prueba_3min.mp3');
+oceanAudio.loop = true;
+oceanAudio.volume = 0.45;
+oceanAudio.preload = 'auto';
+const audioButton = document.getElementById('audioButton');
+async function startOceanAudio(){
+  try { await oceanAudio.play(); audioButton.style.display='none'; }
+  catch(e) { console.warn('Audio pendiente de interacción:',e); audioButton.style.display='block'; }
+}
+audioButton.addEventListener('click',startOceanAudio);
+renderer.xr.addEventListener('sessionstart',startOceanAudio);
+renderer.xr.addEventListener('sessionend',()=>{oceanAudio.pause();audioButton.style.display='none';});
+oceanAudio.addEventListener('error',()=>{audioButton.style.display='block';audioButton.textContent='⚠ No se encuentra el audio del océano';});
+const camera=new THREE.PerspectiveCamera(70,innerWidth/innerHeight,.04,3000);
+const rig=new THREE.Group();scene.add(rig);rig.add(camera);camera.position.y=1.65;
+const boat=new THREE.Group();scene.add(boat);const hullGroup=new THREE.Group();boat.add(hullGroup);
+scene.add(new THREE.HemisphereLight(0x7694d2,0x0b1423,1.45));const moon=new THREE.DirectionalLight(0xa9c6ff,1.25);moon.position.set(-90,150,-70);scene.add(moon);
+const loader=new FBXLoader();const texture=new THREE.TextureLoader().load('./modelos/MedievalShipTexture.png');texture.colorSpace=THREE.SRGBColorSpace;
+const wood=new THREE.MeshStandardMaterial({map:texture,side:THREE.DoubleSide,roughness:.9});const status=document.getElementById('status'),err=document.getElementById('err');
+// Las dos hojas de la puerta se omiten: acceso visual abierto al camarote.
+const parts=['ship','sail_mast','sail_open','sail','sail_pulley','rudder','anchor','anchor_control','flag','lantern.hanging'];
+let hull=null, center=new THREE.Vector3(),size=new THREE.Vector3(15,8,28),failed=[];
+for(const name of parts){try{let obj=await loader.loadAsync('./modelos/'+encodeURIComponent(name)+'.fbx');obj.name=name;obj.traverse(n=>{if(n.isMesh){n.material=wood;n.frustumCulled=false}});hullGroup.add(obj);if(name==='ship')hull=obj;}catch(e){failed.push(name);console.warn(e)}}
+if(!hull){err.textContent='No se ha cargado ship.fbx';}
+const bbox=new THREE.Box3().setFromObject(hull||hullGroup);if(!bbox.isEmpty()){bbox.getCenter(center);bbox.getSize(size);hullGroup.position.sub(center);}
+// Escala uniforme: las puertas y los pasos ganan holgura sin deformar el modelo.
+const SCALE=1.32;hullGroup.scale.setScalar(SCALE);size.multiplyScalar(SCALE);
+const length=Math.max(size.x,size.z,10),width=Math.min(size.x,size.z);
+const longZ=size.z>=size.x; // La dirección larga del casco es la de proa-popa.
+const deckY=Math.max(.6,size.y*.08);const sternZ=longZ?size.z*.22:0;const sternX=longZ?0:size.x*.22;
+rig.position.set(sternX,deckY,sternZ);rig.rotation.y=0;
+const waterY=-size.y*.20; // Sin elevar el casco.
+const oceanGeo=new THREE.PlaneGeometry(2200,2200,112,112);oceanGeo.rotateX(-Math.PI/2);
+const oceanMat=new THREE.ShaderMaterial({
+  uniforms:{uTime:{value:0},uMoon:{value:new THREE.Vector3(-.45,.8,-.2).normalize()}},
+  vertexShader:`uniform float uTime; varying vec3 vPos; varying float vWave;
+  void main(){vec3 p=position; float w=sin(p.x*.030+uTime*.8)*.34+cos(p.z*.024-uTime*.62)*.31
+  +sin((p.x+p.z)*.061+uTime*1.3)*.11;
+  p.y+=w;vWave=w;vPos=p;gl_Position=projectionMatrix*modelViewMatrix*vec4(p,1.);}`,
+  fragmentShader:`uniform float uTime;uniform vec3 uMoon;varying vec3 vPos;varying float vWave;
+  void main(){
+    float ripple=sin(vPos.x*.18+uTime*1.4)*cos(vPos.z*.14-uTime*.9);
+    float fine=sin(vPos.x*.55+vPos.z*.39+uTime*2.3);
+    float foam=smoothstep(.46,.75,vWave+.09*ripple);
+    vec3 deep=vec3(.012,.085,.15),shallow=vec3(.045,.19,.27);
+    vec3 col=mix(deep,shallow,clamp(.45+.45*ripple+.18*fine,0.,1.));
+    vec3 dx=vec3(1.,.030*cos(vPos.x*.030+uTime*.8)+.061*.11*cos((vPos.x+vPos.z)*.061+uTime*1.3),0.);
+    vec3 dz=vec3(0.,-.024*.31*sin(vPos.z*.024-uTime*.62)+.061*.11*cos((vPos.x+vPos.z)*.061+uTime*1.3),1.);
+    vec3 n=normalize(cross(dz,dx));vec3 viewDir=normalize(cameraPosition-vPos);
+    float glint=pow(max(dot(reflect(-normalize(uMoon),n),viewDir),0.),35.);
+    col+=vec3(.26,.37,.45)*glint*.7;
+    col=mix(col,vec3(.39,.56,.61),foam*.28);
+    gl_FragColor=vec4(col,1.);
+  }`,
+  side:THREE.DoubleSide
+});
+const ocean=new THREE.Mesh(oceanGeo,oceanMat);ocean.position.y=waterY;scene.add(ocean);
+const starsGeo=new THREE.BufferGeometry();const starCoords=[];let seed=13429;function rand(){seed=(seed*1664525+1013904223)>>>0;return seed/4294967296}for(let i=0;i<950;i++){const a=rand()*Math.PI*2,v=rand()*.92+.08,r=800;starCoords.push(Math.cos(a)*Math.sqrt(1-v*v)*r,v*r,Math.sin(a)*Math.sqrt(1-v*v)*r)}starsGeo.setAttribute('position',new THREE.Float32BufferAttribute(starCoords,3));scene.add(new THREE.Points(starsGeo,new THREE.PointsMaterial({color:0xdbe8ff,size:1.7,sizeAttenuation:false})));
+const deckLamp=new THREE.PointLight(0xffbc6b,3,Math.max(12,length*.75));deckLamp.position.set(sternX,deckY+3,sternZ);boat.add(deckLamp);
+// Trampilla cerrada, decorativa y sin apertura: tapa el acceso a la bodega.
+const hatch=new THREE.Group();boat.add(hatch);
+const hatchMat=new THREE.MeshStandardMaterial({color:0x483121,roughness:.94});
+const ironMat=new THREE.MeshStandardMaterial({color:0x272b2d,metalness:.62,roughness:.54});
+const hatchW=Math.max(1.2,Math.min(size.x,size.z)*.13),hatchL=hatchW*1.28;
+const hatchDeck=new THREE.Mesh(new THREE.BoxGeometry(hatchW,.09,hatchL),hatchMat);
+hatchDeck.position.set(0,deckY+.035,0);hatch.add(hatchDeck);
+for(let j=-1;j<=1;j++){const strip=new THREE.Mesh(new THREE.BoxGeometry(.035,.015,hatchL),ironMat);
+strip.position.set(j*hatchW*.28,deckY+.095,0);hatch.add(strip);}
+const ring=new THREE.Mesh(new THREE.TorusGeometry(.115,.025,7,12),ironMat);
+ring.rotation.x=Math.PI/2;ring.position.set(0,deckY+.11,hatchL*.31);hatch.add(ring);
+// Faroles de luz cálida, limitados a dos para cuidar el rendimiento en Quest.
+const cabinGlow=new THREE.PointLight(0xffaa55,1.2,Math.max(7,length*.32));
+cabinGlow.position.set(sternX,deckY+2,sternZ);boat.add(cabinGlow);
+
+// Rampa de colisión simplificada para acceder al puente.
+const helm=new THREE.Vector3(sternX,deckY,sternZ);
+const bridgeRise=Math.max(.75,Math.min(1.65,size.y*.12));
+const rampStart=longZ?sternZ-Math.max(2.1,size.z*.12):sternX-Math.max(2.1,size.x*.12);
+const rampEnd=longZ?sternZ+Math.max(.5,size.z*.045):sternX+Math.max(.5,size.x*.045);
+function walkingHeight(x,z){
+ const along=longZ?z:x,across=longZ?x:z;
+ if(Math.abs(across)>Math.max(1.2,(longZ?size.x:size.z)*.26))return deckY;
+ const t=THREE.MathUtils.clamp((along-rampStart)/(rampEnd-rampStart),0,1);
+ return deckY+bridgeRise*t;
+}
+let atHelm=false,heading=0,speed=1.2;
+const controllers=[renderer.xr.getController(0),renderer.xr.getController(1)];controllers.forEach((c,i)=>{rig.add(c);c.addEventListener('selectstart',()=>{if(i===1 && rig.position.distanceTo(helm)<5){atHelm=!atHelm;status.textContent=atHelm?'Timón activo':'Timón libre';}})});
+let gamepads=[null,null];const axes=(i)=>{const sources=renderer.xr.getSession()?.inputSources||[];for(const source of sources){if(source.gamepad && source.handedness===(i===0?'left':'right'))return source.gamepad.axes;}return []};
+function stick(a){return {x:a.length>=4?a[2]:a[0]||0,y:a.length>=4?a[3]:a[1]||0}}
+const clock=new THREE.Clock();let elapsed=0;
+function loop(){const dt=Math.min(clock.getDelta(),.04);elapsed+=dt;
+ const left=stick(axes(0)),right=stick(axes(1));
+ if(renderer.xr.isPresenting){const move=new THREE.Vector3();camera.getWorldDirection(move);move.y=0;move.normalize();const side=new THREE.Vector3().crossVectors(move,new THREE.Vector3(0,1,0)).normalize();if(Math.hypot(left.x,left.y)>.16){rig.position.addScaledVector(move,-left.y*dt*2.5);rig.position.addScaledVector(side,left.x*dt*2.5)}
+ if(atHelm){heading-=right.x*dt*.42;}else if(Math.abs(right.x)>.17){rig.rotation.y-=right.x*dt*1.7;}
+ // límites de cubierta aproximados, sin permitir caminar sobre el mar
+ const limX=Math.max(1.4,size.x*.39),limZ=Math.max(2.2,size.z*.39);rig.position.x=THREE.MathUtils.clamp(rig.position.x,-limX,limX);rig.position.z=THREE.MathUtils.clamp(rig.position.z,-limZ,limZ);rig.position.y=walkingHeight(rig.position.x,rig.position.z);
+ }
+ boat.rotation.y=heading;boat.rotation.z=Math.sin(elapsed*.52)*.007;boat.rotation.x=Math.sin(elapsed*.42)*.005;
+ // El shader anima oleaje, color, espuma y reflejo sin reconstruir geometría en CPU.
+ oceanMat.uniforms.uTime.value=elapsed;renderer.render(scene,camera);
+}
+renderer.setAnimationLoop(loop);
+window.addEventListener('resize',()=>{camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();renderer.setSize(innerWidth,innerHeight)});
+status.textContent=`V08 · barco ampliado · trampilla cerrada · ${failed.length} piezas no disponibles`;
+if(failed.length)err.textContent='Piezas no cargadas: '+failed.join(', ');
+</script></body></html>
